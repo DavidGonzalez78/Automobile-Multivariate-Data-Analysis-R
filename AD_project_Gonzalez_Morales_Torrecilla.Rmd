@@ -1,0 +1,720 @@
+---
+title: "AD_project_Gonzalez_Morales_Torrecilla"
+author: "David González, Ángel Morales, David Torrecilla"
+date: "May 2025"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(VIM)
+library(ggplot2)
+library(gridExtra)
+library(GGally)
+library(DataExplorer)
+library(corrplot)
+library(bestNormalize)
+library(biotools)
+
+set.seed(551182183)
+```
+
+# Developer notes
+
+## Checklist of things to do:
+
+- Descriptive statistics
+
+- Preprocessing
+
+- PCA
+
+- MDS
+
+- CA / MCA
+
+- Clustering
+
+- DA
+
+- MANOVA
+
+
+
+
+# Analysis
+
+## Data reading
+
+```{r}
+# Data reading
+
+data <- read.csv("imports-85.data", header = FALSE, na.strings = "?")
+
+colnames(data) <- c(
+  "symboling",            # Categorical: -3, -2, -1, 0, 1, 2, 3
+  "normalized-losses",    # Continuous: (65, 256)
+  "make",                 # Categorical: car brands (e.g., audi, bmw, toyota, etc.)
+  "fuel-type",            # Categorical: diesel, gas
+  "aspiration",           # Categorical: std, turbo
+  "num-of-doors",         # Categorical: four, two
+  "body-style",           # Categorical: hardtop, wagon, sedan, hatchback, convertible
+  "drive-wheels",         # Categorical: 4wd, fwd, rwd
+  "engine-location",      # Categorical: front, rear
+  "wheel-base",           # Continuous: 86.6 to 120.9
+  "length",               # Continuous: 141.1 to 208.1
+  "width",                # Continuous: 60.3 to 72.3
+  "height",               # Continuous: 47.8 to 59.8
+  "curb-weight",          # Continuous: 1488 to 4066
+  "engine-type",          # Categorical: dohc, dohcv, l, ohc, ohcf, ohcv, rotor
+  "num-of-cylinders",     # Categorical: eight, five, four, six, three, twelve, two
+  "engine-size",          # Continuous: 61 to 326
+  "fuel-system",          # Categorical: 1bbl, 2bbl, 4bbl, idi, mfi, mpfi, spdi, spfi
+  "bore",                 # Continuous: 2.54 to 3.94
+  "stroke",               # Continuous: 2.07 to 4.17
+  "compression-ratio",    # Continuous: 7 to 23
+  "horsepower",           # Continuous: 48 to 288
+  "peak-rpm",             # Continuous: 4150 to 6600
+  "city-mpg",             # Continuous: 13 to 49
+  "highway-mpg",          # Continuous: 16 to 54
+  "price"                 # Continuous: 5118 to 45400
+)
+
+# Convert to numeric where appropriate
+num_cols <- c(
+  "normalized-losses", "wheel-base", "length", "width", "height", "curb-weight",
+  "engine-size", "bore", "stroke", "compression-ratio", "horsepower",
+  "peak-rpm", "city-mpg", "highway-mpg", "price"
+)
+data[num_cols] <- lapply(data[num_cols], as.numeric)
+
+# Convert to factors (categorical variables)
+factor_cols <- c(
+  "symboling", "make", "fuel-type", "aspiration", "num-of-doors",
+  "body-style", "drive-wheels", "engine-location", "engine-type",
+  "num-of-cylinders", "fuel-system"
+)
+data[factor_cols] <- lapply(data[factor_cols], as.factor)
+
+str(data)
+summary(data)
+data
+
+```
+Variable description and units:
+
+- Normalized losses: a proxy for risk or insurance loss
+  - Represents the average relative loss payment per insured vehicle, normalized across all makes and models.
+  
+- Wheel-base: distance between the centers of the front and rear wheels
+
+- Curb-weight: weight of the vehicle without passengers or cargo, but whis standard equipement (oil, coolant, gas)
+
+- Engine-type: ohc (Overhead Camshaft), 1 (Inline), rotor (rotary engine)
+
+- Bore: diameter of the engine cylinder
+
+- Stroke: distance the piston travels in the cylinder
+
+- City-mpg: Fuel efficiency in miles per gallon (mpg) when driving in city conditions
+
+We have to decide if we convert units to SI or not.
+
+We will proceed to remove the variable engine-location because there are only 3 individuals in "rear" class, and 222 in "front" class. The cars with rear engine are 3 Porches, which are the "hardtop" and "convertible" body-style Porches. This means that the information of engine-location is contained inside the variables make and body-style, because all cars are front engine except hardtop and convertible Porsche cars, and all of those are rear engine.
+
+We can remove this variable BEFORE imputing missing values because the only missing values in the 3 rows containing rear engine-location are of normalized-loss but there are no references for this variable which do have rear engine-location. This means that engine-location cannot be used to imputate missing values.
+
+```{r}
+# Remove variable "engine-location"
+
+data <- data[, !(names(data) %in% "engine-location")] # Safely by name (only removes if it exists)
+data
+```
+We will study the correlation before imputing values, because there may be unnecessary variables.
+
+```{r, fig.height=7, fig.width=20}
+# Big correlation matrix
+
+# Keep only numeric variables
+numeric_data <- data[, sapply(data, is.numeric)]
+
+# Remove rows with NA in any of the numeric columns
+numeric_data_complete <- na.omit(data)
+# Plot correlation matrix only on complete numeric data
+plot_correlation(numeric_data_complete, title = "Correlation Matrix (Complete Cases Only)")
+
+```
+With this scatterplot matrix we detect some high-correlation groups:
+- city-mpg, highway-mpg, horsepower
+- length, wheel-base, width, curb-weight
+- compression-ratio, fuel-type, engine-type, num-of-cylinders
+
+Let's take a look:
+
+```{r, fig.height=7, fig.width=7}
+# Little correlation matrix
+
+# Keep only numeric columns
+numeric_vars <- data[, sapply(data, is.numeric)]
+
+# Remove variables with more than a threshold of missing values (e.g., 50%)
+na_threshold <- 0.5
+valid_vars <- sapply(numeric_vars, function(col) mean(is.na(col)) < na_threshold)
+numeric_vars <- numeric_vars[, valid_vars]
+
+# Compute correlation matrix with pairwise complete observations
+cor_matrix <- cor(numeric_vars, use = "pairwise.complete.obs")
+
+# Plot correlation matrix
+corrplot(cor_matrix, method = "color", type = "upper",
+         tl.col = "black", tl.srt = 45,
+         addCoef.col = "black", number.cex = 0.7,
+         title = "Correlation Matrix (Simplified)", mar = c(0,0,1,0))
+```
+We have discovered that there is a big group of variables which share a lot of information: wheel-base, length, width, curb-weight, engine-size, bore, horsepower, city-mpg, highway-mpg and price.
+
+```{r, fig.height=7, fig.width=10}
+# Scatterplot matrix 1
+
+# Select a manageable subset of numeric and categorical variables
+vars_to_plot <- c("wheel-base", "length", "width", "curb-weight", "engine-size", "bore", "horsepower", "city-mpg", "highway-mpg", "price")
+
+# Subset the imputed dataset
+plot_data <- data[, vars_to_plot]
+
+# Create scatterplot matrix
+ggpairs(
+  plot_data,
+  mapping = aes(alpha = 0.6),
+  upper = list(continuous = wrap("points", size = 1)),
+  lower = list(continuous = wrap("smooth", alpha = 0.3, size = 0.5)),
+  diag = list(continuous = wrap("densityDiag")),
+  title = "Scatterplot Matrix of Selected Variables"
+)
+```
+The scatterplot matrix allows to see:
+
+- city-mpg and highway-mpg share a lot of information. They should be joined in one variable: combined-mpg.
+
+- wheel-base is less intuitive than length and hides similar information. Because we see that the relation between wheel-base and the rest of variables is quite similar to the relation between lentgh and those, but more sparse, we should erase wheel-base.
+
+- The other variables do not have that much linear colinearity. One option is to think about new variables that could be made from them (for example: power-weight ratio using horsepower and curb-weight, or size using length and width). Another option is to leave them as is, because we will later apply PCA and MDS to all the dataset, and a last option is to apply PCA or MDS exclusevely to this variables, which would be a proper way to reduce dimensionality losing little information.
+
+```{r}
+# Scatterplot matrix 3
+
+# Select a manageable subset of numeric and categorical variables
+vars_to_plot <- c("compression-ratio", "fuel-type", "engine-type", "num-of-cylinders")
+
+# Subset the imputed dataset
+plot_data <- data[, vars_to_plot]
+
+# Create scatterplot matrix
+ggpairs(
+  plot_data,
+  mapping = aes(alpha = 0.6),
+  upper = list(continuous = wrap("points", size = 1)),
+  lower = list(continuous = wrap("smooth", alpha = 0.3, size = 0.5)),
+  diag = list(continuous = wrap("densityDiag")),
+  title = "Scatterplot Matrix of Selected Variables"
+)
+```
+We can observe now that "fuel-type" is redundant having the "compression-ratio": all "gas" cars have the lower values, while "diesel" cars have the upper values. "fuel-type" should be removed.
+
+```{r}
+# Remove variables fuel-type and wheel-base
+
+data <- data[, !(names(data) %in% "wheel-base")] # Safely by name (only removes if it exists)
+data <- data[, !(names(data) %in% "fuel-type")] # Safely by name (only removes if it exists)
+data
+```
+Now we will study the missing values.
+
+```{r}
+# Missing values
+
+## Count of missing values per column
+missing_counts <- colSums(is.na(data))
+missing_counts
+
+## Percentage of missing values per column and heatmap
+
+### Subset only columns with missing values
+missing_cols <- names(data)[colSums(is.na(data)) > 0]
+data_missing_only <- data[missing_cols]
+
+### Create the aggr plot for just the subset
+aggr(
+  data_missing_only,
+  col = c("skyblue", "red"),
+  numbers = TRUE,
+  sortVars = TRUE,
+  labels = missing_cols,
+  cex.axis = 0.5,
+  ylab = c("Missing Data", "Pattern")
+)
+```
+Let's try to imputate the missing values (using single imputation, without randomness nor new datasets).
+
+```{r}
+# Imputation of missing values
+
+# Run kNN imputation
+data_imputed_full <- kNN(data, k = 5)
+
+# Separate _imp columns
+imp_flags <- data_imputed_full[, grepl("_imp$", names(data_imputed_full))]
+
+# Remove _imp columns from main data
+data_imputed <- data_imputed_full[, !grepl("_imp$", names(data_imputed_full))]
+
+# Now we have:
+# - data_imputed: cleaned dataset (25 variables + imputed values)
+# - imp_flags: TRUE/FALSE indicators for imputation (same number of rows)
+
+imp_flags
+data_imputed
+
+summary(data_imputed)
+```
+There are no missing values now.
+
+We will proceed to join "city-mpg" with "highway-mpg" into "combined-mpg" using the formula used by the USA EPA.
+
+```{r}
+# Joining of city-mpg and highway-mpg
+
+if (all(c("city-mpg", "highway-mpg") %in% names(data_imputed))) {
+  data_imputed$`combined-mpg` <- 0.55 * data_imputed$`city-mpg` + 0.45 * data_imputed$`highway-mpg`
+} else {
+  warning("Cannot compute combined_mpg: 'city-mpg' and/or 'highway-mpg' not found in data_imputed.")
+}
+
+# Variables to remove
+vars_to_remove <- c("city-mpg", "highway-mpg")
+imp_cols_to_remove <- paste0(vars_to_remove, "_imp")
+
+# Remove from main dataset
+data_imputed <- data_imputed[, !names(data_imputed) %in% vars_to_remove]
+
+# Remove from imp_flags (only if they exist)
+imp_flags <- imp_flags[, names(imp_flags) %in% setdiff(names(imp_flags), imp_cols_to_remove)]
+
+data_imputed
+```
+We will check normality on the numerical variables.
+
+```{r}
+# Normality checking
+
+# Use the imputed dataset and its corresponding flags
+# 'data_imputed' and 'imp_flags' should already be created
+
+# Combine flags into main dataset for plotting
+data_plot <- cbind(data_imputed, imp_flags)
+
+# Get numeric variables only (from original data columns)
+numeric_vars <- names(data)[sapply(data, is.numeric)]
+
+for (var in numeric_vars) {
+  cat("Variable:", var, "\n")
+  
+  # Ensure imputation flag exists
+  imp_flag <- paste0(var, "_imp")
+  if (!imp_flag %in% names(data_plot)) {
+    cat("No imputation flag found for", var, "\n\n")
+    next
+  }
+
+  # Prepare clean data for test
+  clean_var <- data_plot[[var]][!is.na(data_plot[[var]])]
+  if (length(clean_var) < 3) {
+    cat("Not enough data for Shapiro-Wilk test\n\n")
+    next
+  }
+
+  # Shapiro-Wilk Test
+  test_result <- shapiro.test(clean_var)
+  print(test_result)
+
+  # Histogram stacked by imputation status
+  p1 <- ggplot(data_plot, aes(x = .data[[var]], fill = .data[[imp_flag]])) +
+    geom_histogram(bins = 30, color = "black", position = "stack", alpha = 0.8) +
+    scale_fill_manual(values = c("FALSE" = "skyblue", "TRUE" = "orange"),
+                      labels = c("Original", "Imputed")) +
+    theme_minimal() +
+    labs(
+      title = paste("Histogram of", var, "with Imputed Values"),
+      x = var,
+      fill = "Value Type"
+    )
+
+  # Q-Q Plot
+  p2 <- ggplot(data_plot, aes(sample = .data[[var]])) +
+    stat_qq() +
+    stat_qq_line(color = "red") +
+    theme_minimal() +
+    ggtitle(paste("Q-Q Plot of", var)) +
+    xlab(var)
+
+  # Arrange plots side by side
+  grid.arrange(p1, p2, ncol = 2)
+
+  cat("------------------------------------------------------------\n\n")
+}
+
+
+```
+We have to be careful because most of the variables cannot be considered normal. Some look quite normal, though Shapiro-Wilk test rejects normality for every variable.
+
+Transformations may be required.
+
+We will proceed to search for and treat outliers.
+
+```{r}
+# Transform variables and treat outliers
+
+# Identify all numerical variables in the dataset
+vars_to_transform <- names(data_imputed)[sapply(data_imputed, is.numeric)]
+
+# Create a list to store transform objects
+transform_objects <- list()
+data_transformed <- data_imputed  # Start with a copy of original data
+
+# First, transform all numerical variables and store the transformed data
+for (var in vars_to_transform) {
+  x <- data_imputed[[var]]
+  if (length(na.omit(x)) < 3) {
+    warning(paste("Skipping", var, "- fewer than 3 non-NA values"))
+    next  # Skip short series
+  }
+  
+  # Perform transformation
+  transform_obj <- bestNormalize(x, na.rm = TRUE)
+  transform_objects[[var]] <- transform_obj
+  
+  # Store transformed values
+  data_transformed[[var]] <- predict(transform_obj, newdata = x)
+}
+
+# Create a clean dataset by removing rows with outliers in ANY transformed variable
+clean_rows <- rep(TRUE, nrow(data_imputed))  # Start with all rows included
+
+for (var in vars_to_transform) {
+  x_trans <- data_transformed[[var]]
+  
+  if (length(na.omit(x_trans)) < 3) next  # Skip if not enough data
+  
+  # Calculate IQR bounds
+  Q1 <- quantile(x_trans, 0.25, na.rm = TRUE)
+  Q3 <- quantile(x_trans, 0.75, na.rm = TRUE)
+  IQR_val <- Q3 - Q1
+  lower_bound <- Q1 - 1.5 * IQR_val
+  upper_bound <- Q3 + 1.5 * IQR_val
+  
+  # Update clean_rows to keep only rows that are within bounds for ALL variables
+  clean_rows <- clean_rows & 
+    (!is.na(x_trans)) &  # Keep only non-NA values
+    (x_trans >= lower_bound) & 
+    (x_trans <= upper_bound)
+}
+
+# Apply the clean_rows filter to all datasets
+data_cleaned <- data_imputed[clean_rows, ]
+data_transformed_cleaned <- data_transformed[clean_rows, ]
+
+# Create comparison plots for each variable
+for (var in vars_to_transform) {
+  # Prepare data
+  original_values <- data_imputed[[var]]
+  transformed_values <- data_transformed[[var]]
+  cleaned_values <- data_transformed[[var]][clean_rows]
+  
+  # Calculate IQR bounds for transformed data
+  Q1 <- quantile(transformed_values, 0.25, na.rm = TRUE)
+  Q3 <- quantile(transformed_values, 0.75, na.rm = TRUE)
+  IQR_val <- Q3 - Q1
+  lower_bound <- Q1 - 1.5 * IQR_val
+  upper_bound <- Q3 + 1.5 * IQR_val
+  
+  # Create outlier indicator for transformed data
+  transformed_df <- data.frame(
+    value = transformed_values,
+    type = "Transformed",
+    is_outlier = ifelse(transformed_values < lower_bound | 
+                        transformed_values > upper_bound, 
+                       "Outlier", "Normal")
+  ) %>% na.omit()
+  
+  # Create data frames for plotting
+  df_original <- data.frame(value = original_values, type = "Original") %>% na.omit()
+  df_cleaned <- data.frame(value = cleaned_values, type = "Cleaned") %>% na.omit()
+  
+  # Create plots with enhanced features
+  p1 <- ggplot(df_original, aes(x = type, y = value)) +
+    geom_boxplot(fill = "skyblue", outlier.shape = NA) +
+    geom_jitter(width = 0.2, alpha = 0.3, size = 1) +
+    labs(title = paste("Original", var), y = var, x = NULL) +
+    theme_minimal()
+  
+  p2 <- ggplot(transformed_df, aes(x = type, y = value)) +
+    geom_boxplot(fill = "gold", outlier.shape = NA) +
+    geom_jitter(aes(color = is_outlier), width = 0.2, alpha = 0.5, size = 1.5) +
+    scale_color_manual(values = c("Normal" = "gray", "Outlier" = "red")) +
+    labs(title = paste("Transformed", var), 
+         y = paste("Transformed", var), 
+         x = NULL,
+         color = "Point Type") +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+  
+  p3 <- ggplot(df_cleaned, aes(x = type, y = value)) +
+    geom_boxplot(fill = "lightgreen", outlier.shape = NA) +
+    geom_jitter(width = 0.2, alpha = 0.3, size = 1) +
+    labs(title = paste("Cleaned Transformed", var), 
+         y = paste("Transformed", var), 
+         x = NULL) +
+    theme_minimal()
+  
+  # Arrange plots
+  grid.arrange(p1, p2, p3, nrow = 1, widths = c(1, 1.2, 1))
+}
+```
+```{r}
+data_transformed
+data_transformed_cleaned
+
+data = data_cleaned
+data_gaussian = data_transformed_cleaned
+```
+```{r}
+# Normality checking
+
+# Get numeric variables only (from original data columns)
+numeric_vars <- names(data_gaussian)[sapply(data_gaussian, is.numeric)]
+
+for (var in numeric_vars) {
+  cat("Variable:", var, "\n")
+
+  # Prepare clean data for test
+  clean_var <- data_gaussian[[var]][!is.na(data_gaussian[[var]])]
+  if (length(clean_var) < 3) {
+    cat("Not enough data for Shapiro-Wilk test\n\n")
+    next
+  }
+
+  # Shapiro-Wilk Test
+  test_result <- shapiro.test(clean_var)
+  print(test_result)
+
+  # Histogram stacked by imputation status
+  p1 <- ggplot(data_gaussian, aes(x = .data[[var]])) +
+    geom_histogram(bins = 30, color = "black", alpha = 0.8) +
+    theme_minimal() +
+    labs(
+      title = paste("Histogram of", var),
+      x = var,
+      fill = "Value Type"
+    )
+
+  # Q-Q Plot
+  p2 <- ggplot(data_gaussian, aes(sample = .data[[var]])) +
+    stat_qq() +
+    stat_qq_line(color = "red") +
+    theme_minimal() +
+    ggtitle(paste("Q-Q Plot of", var)) +
+    xlab(var)
+
+  # Arrange plots side by side
+  grid.arrange(p1, p2, ncol = 2)
+
+  cat("------------------------------------------------------------\n\n")
+}
+
+
+```
+We will keep 2 datasets:
+
+data
+data_gaussian
+
+There are no missing values in any of them and both contain the same rows.
+data_gaussian does not contain outliers, while data does contain outliers (because the quantiles are different depending if the data is transformed or not).
+
+
+# PCA and FA
+
+Because the scaling is very different (take for example price, around 10 to 20 thousant dollars, vs length, around 100 to 200 inches), we will apply PCA and FA using the correlation matrix.
+
+```{r}
+data = data_gaussian
+```
+
+
+## PCA and FA over the "high-correlation group"
+
+```{r, fig.height=7, fig.width=10}
+# PCA over the "high-correlation group"
+
+hcg <- c("length", "width", "curb-weight", "engine-size", "bore", "horsepower", "price", "combined-mpg")
+
+# Subset the imputed dataset
+data_hc <- data_gaussian[, hcg]
+
+# Perform PCA on the highly correlated variables
+pcahc <- princomp(data_hc, cor = TRUE)
+summary(pcahc)
+
+eigs <- pcahc$sdev^2
+eigs
+plot(eigs, type="b")
+
+pcahc$loadings
+biplot(pcahc)
+```
+
+
+Those 8 variables clearly share a lot of information. 
+
+Usually PCA is used to keep as much variance as possible, with the main goal to reduce dimensionality, while factor analysis is used to understand the underlying relations that variables keep.
+
+In our case, we are not trying to understand why longer cars tend to wider or heavier, or why cars with more horsepower tend to be less efficient or more expensive, because this relations are quite simple and predictable. Our goal now is to reduce this variables as much as possible, so we will use PCA. 
+
+There are 3 usual criteria to choose how many components to keep: having an 80% or more of explained variation, taking only components with eigenvalues greater than 1, or taking the components up to the point where the bend occurs. While taking only 1 component in this case only gives a 75%, we can clearly see an elbow point on 2, and the only eigenvalue greater than 1 is the first one.
+
+Because our main goal is to reduce dimensions as much as possible, as we still have 14 variables to study, we are going to take only 1 component.
+
+As we can see on the plot, it's usual that cars share a tendency to have bigger and more powerful engines when they get bigger, and also become pricey. We can try to distinguish "light" vs "heavy" cars. Light cars are smaller, have less horsepower, less engine size and weight less, in exchange of having less combined-mpg and being cheaper. On the other side, heavy cars have bigger and more powerful engines, and tend to get expensive.
+
+We will not convert this component into a classification. We will keep the variable numerical and call it the "SWaP-C", which is used as an acronym for Size, Weight, Power and Cost in some industries. This is not related to car manufacturing, though it's commonly used as a "goal": minimizing those variables is usually a good practice. In our case, minimizing the SWaP-C will mean having a better efficiency (less mpg). We will be able to understand which other variables (such as car companies or body types) are related to a lower SWaP-C.
+
+
+```{r}
+# Keep the component as a new variable, erase the other 8
+
+new_data_gaussian = data_gaussian
+
+## Add the new component SWaPC
+
+# Extract the first principal component (PC1)
+swapc_scores <- pcahc$scores[, 1]  # First PC only
+
+# Scale it (optional: gives mean 0, sd 1 for easier comparison)
+swapc_scaled <- scale(swapc_scores)
+
+# Add SWaP-C to your main dataset
+new_data_gaussian$SWaPC <- as.numeric(swapc_scaled)
+
+# Quick distribution plot
+library(ggplot2)
+ggplot(new_data_gaussian, aes(x = SWaPC)) +
+  geom_histogram(bins = 30, fill = "skyblue", color = "black") +
+  theme_minimal() +
+  ggtitle("Distribution of SWaP-C Score") +
+  xlab("SWaP-C (Standardized PC1)")
+
+
+## Remove the other 8 variables
+
+# Variables to remove
+vars_to_remove <- hcg
+imp_cols_to_remove <- paste0(vars_to_remove, "_imp")
+
+# Remove from main dataset
+new_data_gaussian <- new_data_gaussian[, !(names(new_data_gaussian) %in% vars_to_remove)]
+
+# Remove from imp_flags (only if they exist)
+imp_flags <- imp_flags[, names(imp_flags) %in% setdiff(names(imp_flags), imp_cols_to_remove)]
+
+new_data_gaussian
+```
+
+## PCA over the full dataset (without joining the hcg)
+
+```{r, fig.height=7, fig.width=10}
+# PCA over all the numerical variables (including the ones with high correlation)
+
+data_num <- data_gaussian[, sapply(data, is.numeric)]
+
+pcahc<-princomp(data_num, cor=TRUE) 
+summary(pcahc)
+
+eigs<-pcahc$sdev^2
+eigs
+plot(eigs,type="b")
+
+pcahc$loadings
+biplot(pcahc)
+```
+## PCA over the dataset after joining the 8 correlated variables into one component
+
+```{r, fig.height=7, fig.width=10}
+# PCA over all the numerical variables after joining the 8 correlated ones
+
+data_num <- new_data_gaussian[, sapply(new_data_gaussian, is.numeric)]
+
+pcahc<-princomp(data_num, cor=TRUE) 
+summary(pcahc)
+
+eigs<-pcahc$sdev^2
+eigs
+plot(eigs,type="b")
+
+pcahc$loadings
+biplot(pcahc)
+```
+Notice: stroke is not very correlated to SWaPC but still has been placed almost over it in 2dims. Plotting more dimensions may be necessary.
+
+We observe that applying PCA to those 8 correlated variables and then applying PCA to the dataset, excluding them but including the SWaPC, is quite similar to applying PCA to the entire dataset. The main difference is that other variables are more sparse if we use SWaPC, which results in a more comprehensible result, and makes it easier to study other relations. If we do not join the SWaPC group, these variables take up more space and explained variance, but the information that they give to us is not as important.
+
+```{r}
+data = new_data_gaussian
+data
+```
+
+
+----------------------
+TODO:
+
+MDS over all the dataset (numerical and categorical)
+...
+
+
+
+Coments:
+
+- "data" is now gaussian. To work without the transformations, PCA should be applied to the original variables. Send a WhatsApp to Angel to solve the issue.
+
+
+
+#MANOVA
+Before performing MANOVA, we verify the assumption of equal covariance matrices across the levels of the grouping variable. This ensures the stability of relationships among the dependent variables within each category of body.style.
+```{r}
+boxM(data[, c("height", "stroke", "peak-rpm", "SWaPC")], data[["body-style"]])
+```
+The result of the Box’s M test indicates a mild violation of the homogeneity of covariance matrices (p = 0.022). .
+
+```{r}
+summary.aov(manova_model)
+```
+The MANOVA results indicate a statistically significant effect of the body-style factor on the combination of dependent variables (stroke, peak-rpm, and SWaPC), F(12, 567) = 2.43, p = 0.004. This suggests that at least one of the variables differs across body-style categories.
+
+```{r}
+summary.aov(manova_model)
+```
+Univariate ANOVA results revealed that only SWaPC showed significant differences across body-style groups (p = 0.0011), while stroke and peak-rpm did not yield statistically significant effects. This suggests that the overall MANOVA result is primarily driven by variations in SWaPC.
+
+```{r}
+
+data$bodystyle <- data$`body-style`
+
+# Ajustar el modelo ANOVA con la nueva variable
+anova_swa <- aov(SWaPC ~ bodystyle, data = data)
+
+# Aplicar Tukey HSD usando el nuevo nombre
+TukeyHSD(anova_swa, "bodystyle")
+
+```
+
+Post-hoc Tukey HSD analysis revealed that SWaPC values differ significantly between hatchback and both sedan (p = 0.014) and wagon (p = 0.028) body styles. No other pairwise comparisons reached statistical significance.
